@@ -1,0 +1,3 @@
+# The daemon runs on Linux; keep LF in the repo so checkouts stay byte-identical.
+* text=auto eol=lf
+*.png binary

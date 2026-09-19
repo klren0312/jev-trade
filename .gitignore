@@ -1,0 +1,26 @@
+# 秘密：绝对不要提交
+.jev_key
+.dash_token
+*.key
+.env
+
+# 运行时状态：账户 + 决策流 + 价格基准（删掉即重置模拟盘）
+.paper_state.json
+.paper_state.json.tmp
+*.test.json
+
+# 守护进程产物
+live.log
+live.out
+live.pid
+live.in
+
+# Node
+node_modules/
+npm-debug.log*
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
