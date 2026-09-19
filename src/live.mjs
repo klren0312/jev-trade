@@ -22,6 +22,10 @@ const EVENTS_KEEP = 120; // in-memory feed is capped lower for the UI; the file 
 const events = [];
 
 const QUOTE = (process.env.JEV_QUOTE || DEFAULT_QUOTE).toUpperCase();
+// Under pm2 (and any piped/redirected stdin) there is no TTY: readline would hit
+// EOF at once and its close handler would tear down the price feed, leaving a
+// process that looks alive but is blind. So the REPL is opt-in on a real terminal.
+const INTERACTIVE = Boolean(process.stdin.isTTY) && process.env.JEV_NO_REPL !== "1";
 // The watchlist is mutable: setAssets() rewrites these in place, so every reader
 // (scans, Jev prompts, dashboard) sees the current list without a restart.
 const ASSETS = []; // base names, e.g. "APT"
@@ -245,10 +249,12 @@ const initialAssets = process.env.JEV_ASSETS ?? (Array.isArray(saved?.assets) ? 
 await setAssets(initialAssets, { quiet: true, restoreOpen: saved?.open });
 console.log(`行情: Binance 实时（${QUOTE} 报价）| 币种: ${ASSETS.join(" ") || "无"} | 信号: ${live() ? "Jev LIVE API" : "Jev MOCK (设置 JEV_API_KEY 启用真实模型)"}`);
 if (!saved?.account) saveState(); // a fresh start still needs its price baseline on disk
-console.log(`直接输入新闻标题回车即触发信号交易；p=持仓 q=退出 c <币种>=换币（如 c BTC ETH）\n`);
+console.log(INTERACTIVE
+  ? `直接输入新闻标题回车即触发信号交易；p=持仓 q=退出 c <币种>=换币（如 c BTC ETH）\n`
+  : `[mode] 非交互运行（非 TTY 或 JEV_NO_REPL=1）：跳过 REPL，新闻走看板 POST /news 或自动新闻循环\n`);
 
 function renderTicker(a) {
-  if (!a || !prices[a]) return;
+  if (!INTERACTIVE || !a || !prices[a]) return;
   const chg = open[a] ? ((prices[a] / open[a] - 1) * 100).toFixed(2) : "0.00";
   process.stdout.write(`\r${a} ${prices[a].toFixed(decOf(a))} (${chg}%) | 权益 ${equityNow().toFixed(2)}   `);
 }
@@ -342,8 +348,23 @@ function showPositions() {
   console.log(`  状态文件: ${STATE_FILE}\n`);
 }
 
-const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "新闻> " });
-const done = () => rl.closed === true;
+// The REPL only exists on a real terminal; q is the only path that closes the feed.
+if (INTERACTIVE) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "新闻> " });
+  rl.prompt();
+  rl.on("line", async (raw) => {
+    const line = raw.trim();
+    if (line.toLowerCase() === "q" || line.toLowerCase() === "exit") { showPositions(); feed.close(); rl.close(); return; }
+    if (line.toLowerCase() === "p") showPositions();
+    else if (/^c(\s|$)/i.test(line)) { const r = await setAssets(line.replace(/^c\s*/i, "")); for (const x of r.rejected) console.log(`  拒绝 ${x.asset}: ${x.reason}`); }
+    else if (line) await submit(line);
+    if (rl.closed === true) return;
+    console.log();
+    renderTicker(ASSETS[0] ?? null);
+    rl.prompt();
+  });
+  rl.on("close", () => feed.close());
+}
 
 const queue = [];
 let processing = false;
@@ -455,20 +476,6 @@ if (process.env.JEV_AUTO_NEWS === "1") {
 }
 console.log(`[price] 纯行情决策已开启：每${SCAN_MS / 1000}s 扫描 5分±0.8%/30分±1.5%/RSI±(72,28) 入场，` +
   `风控 止损-${STOP_PCT}% 止盈+${TP_PCT}% 移动止盈回吐${TRAIL_PCT}% 持仓复核${REVIEW_MS / 60000}分；指标每${TECH_MS / 1000}s 刷新`);
-
-rl.prompt();
-rl.on("line", async (raw) => {
-  const line = raw.trim();
-  if (line.toLowerCase() === "q" || line.toLowerCase() === "exit") { showPositions(); feed.close(); rl.close(); return; }
-  if (line.toLowerCase() === "p") showPositions();
-  else if (/^c(\s|$)/i.test(line)) { const r = await setAssets(line.replace(/^c\s*/i, "")); for (const x of r.rejected) console.log(`  拒绝 ${x.asset}: ${x.reason}`); }
-  else if (line) await submit(line);
-  if (done()) return;
-  console.log();
-  renderTicker(ASSETS[0] ?? null);
-  rl.prompt();
-});
-rl.on("close", () => feed.close());
 
 function dashToken() {
   if (process.env.JEV_DASH_TOKEN) return process.env.JEV_DASH_TOKEN.trim();

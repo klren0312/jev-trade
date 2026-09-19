@@ -32,14 +32,26 @@ REPL 里：直接输入标题 = 注入一条新闻；`p` 看持仓与权益；`c
 - **移出观察列表 ≠ 平仓**。移出的币种不再触发入场信号，但只要还持有，行情订阅、止损/止盈/移动止盈/复核照常工作（`prices`/`meta` 保留，`cost`/`peak` 在账簿里）。
 - **观察列表可以为空**：此时不订阅行情，只管理已有持仓。
 
-带看板和自动新闻的常驻跑法：
+常驻运行用 pm2（`ecosystem.config.cjs` 里已配好端口、自动新闻和日志路径）：
 
 ```bash
-JEV_DASH_PORT=3000 JEV_AUTO_NEWS=1 JEV_NEWS_INTERVAL=45000 \
-  node src/live.mjs < live.in > live.log 2>&1 &   # live.in 用 mkfifo 建，可随时 printf "标题\n" > live.in
+pm2 start ecosystem.config.cjs           # 等价于 JEV_DASH_PORT=3000 JEV_AUTO_NEWS=1 JEV_NEWS_INTERVAL=45000 JEV_NO_REPL=1
+pm2 save                                 # 记住进程列表
+pm2 startup systemd -u root --hp /root   # 开机自启（配一次即可，之后 systemctl start pm2-root）
+pm2 logs jev-trade --lines 50            # 跟踪日志（logs/out.log、logs/err.log）
+pm2 restart jev-trade                    # 重启（状态文件保证账户不丢）
 ```
 
-看板：`http://<host>:3000/?t=<token>`，token 在 `.dash_token`（首次启动自动生成）。`/events` 是 SSE 推送，`POST /news?t=<token>` 注入新闻，`GET/POST /assets?t=<token>` 读写币种列表。
+pm2 会给自己分配 pty，所以 `stdin.isTTY` 为真——`JEV_NO_REPL=1` 显式关掉交互式 REPL，否则 readline 一 EOF 就会关掉行情源，而且日志会被 `\r` 刷新的报价行淹没。非交互模式下新闻改走看板的 `POST /news`。
+
+本地调试想用前台 REPL（输入标题、`p`、`c`、`q`）就直接 `node src/live.mjs`。
+
+看板：`http://<host>:3000/?t=<token>`，token 在 `.dash_token`（首次启动自动生成）。`/events` 是 SSE 推送，`GET/POST /assets?t=<token>` 读写币种列表，`POST /news?t=<token>` 注入新闻：
+
+```bash
+curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
+  -H 'content-type: application/json' -d '{"headline":"SEC approves spot ETF for ..."}'
+```
 
 ## 决策链路
 
@@ -122,10 +134,11 @@ JEV_DASH_PORT=3000 JEV_AUTO_NEWS=1 JEV_NEWS_INTERVAL=45000 \
 | `JEV_COOLDOWN_MS` / `JEV_RISK_COOLDOWN_MS` | `1200000` / `600000` | 入场 / 风控冷却 |
 | `JEV_DASH_PORT` / `JEV_DASH_TOKEN` | 关 / `.dash_token` | 看板端口与 token |
 | `JEV_AUTO_NEWS` / `JEV_NEWS_INTERVAL` | 关 / `60000` | 自动新闻轮询 |
+| `JEV_NO_REPL` | 无 | `1` = 强制跳过交互式 REPL（无 TTY 时自动跳过） |
 
 ## 已知的现实约束
 
 - 本机和目标服务器都只有 `data-api.binance.vision` / `data-stream.binance.vision` 可达，OKX、Coinbase、binance.com 会超时。
 - 线上 Jev 与文档/mock 行为不一致：`score` 返回**数字**加 `legend` 映射（不是档位字符串）；`noul` **不返回 confidence**（代码用 `max(p, 1-p)` 推）；整体比关键词 mock 保守得多，把「某币涨了 x%」当作非事件（mat≈0.25）——所以行情决策走独立问答，不复用新闻的材料性闸门。
-- 服务器（`/root/jev-trade`，CentOS 9）需显式用 nvm 里的 node 绝对路径；安全组只放通 3000。
+- 服务器（`/root/jev-trade`，CentOS 9）用 pm2 常驻：进程定义 `ecosystem.config.cjs`，开机自启靠 systemd 单元 `pm2-root`（`pm2 startup` 生成，已 enabled），日志 `logs/` 由 `/etc/logrotate.d/jev-trade` 每日切割。node 走 nvm 绝对路径；安全组只放通 3000。
 - 生产上请轮换并重新写入 `.jev_key`，不要把它贴进任何命令行或聊天记录。
