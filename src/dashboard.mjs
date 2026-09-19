@@ -13,7 +13,7 @@ export function startDashboard({ port, host = "0.0.0.0", token, bus, getState, i
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
-    if (url.pathname === "/") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(PAGE); }
+    if (url.pathname === "/") { res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(PAGE); }
     if (url.searchParams.get("t") !== token) { res.writeHead(401); return res.end("unauthorized"); }
 
     if (url.pathname === "/events") {
@@ -84,7 +84,12 @@ button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:9px 18px
 .coinadd input{padding:5px 10px;font-size:13px}
 .coinadd button{padding:5px 12px;font-size:13px}
 .err{color:#ff6b6b;font-size:12px}
+#auth{display:none;position:sticky;top:0;z-index:9;background:#2a1116;border-bottom:1px solid #ff6b6b55;padding:10px 18px;gap:8px;align-items:center}
+#auth.on{display:flex}
+#auth input{flex:1;max-width:420px}
+#auth span{color:#ff9f9f;font-size:13px;flex:none}
 </style></head><body>
+<div id="auth"><span id="authmsg"></span><input id="at" placeholder="看板 token（服务器执行 cat .dash_token）" autocomplete="off"><button id="ab">连接</button></div>
 <header><div class="card"><div class="dim">权益 equity</div><b id="eq">–</b> USDC<div class="sig" id="pnl"></div></div><div id="cards" style="display:flex;gap:14px;flex-wrap:wrap"></div></header>
 <main>
 <div class="coins" id="coins"></div>
@@ -94,7 +99,9 @@ button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:9px 18px
 <datalist id="qp"></datalist>
 </main>
 <script>
-const T=new URLSearchParams(location.search).get("t")||"";
+const QS=new URLSearchParams(location.search);
+let T=QS.get("t")||localStorage.getItem("jevT")||"";
+if(QS.get("t"))localStorage.setItem("jevT",QS.get("t"));
 let open={},cards={},feed=[],acct={},tape={},risk={},assets=[],dec={},qp=[],coinsErr="";
 const $=(s)=>document.querySelector(s);
 const decOf=(a)=>dec[a]!=null?dec[a]:(open[a]&&open[a].p<10?4:2);
@@ -129,7 +136,14 @@ return '<span class="sig"><b class="dim">'+a+'</b> 价格 '+(t.px==null?"–":fm
 ' · RSI14 '+(t.rsi14==null?"–":Number(t.rsi14).toFixed(0))+' · 量比 '+(t.volRatio==null?"–":Number(t.volRatio).toFixed(2))+
 ' · 5分 '+f(t.pct5)+' · 30分 '+f(t.pct30)+' · 1时 '+f(t.pct60)+' · 24h '+f(t.pct24,1)+' · 区间 '+(t.rangePos==null?"–":Number(t.rangePos).toFixed(0)+"%")+'</span>'}).join("<br>");
 $("#tape").innerHTML=(rows||"")+'<div class="sig dim">风控阈值：止损 -'+fmt(R.stopPct)+'% · 移动止盈 回吐 '+fmt(R.trailPct)+'%（浮盈≥'+fmt(R.trailArm??R.trailArmPct)+'% 后激活）· 止盈 +'+fmt(R.tpPct)+'% · 持仓复核 每 '+fmt(R.reviewMin,0)+' 分</div>'}
-new EventSource("/events?t="+T).onmessage=(m)=>{const e=JSON.parse(m.data);
+let es=null;
+function showAuth(m){$("#authmsg").textContent=m;$("#auth").classList.add("on")}
+function connect(){if(!T){showAuth("需要 token：服务器上执行 cat .dash_token，粘贴到右边后回车");return}
+es?.close();$("#auth").classList.remove("on");
+es=new EventSource("/events?t="+encodeURIComponent(T));
+es.onmessage=(m)=>{$("#auth").classList.remove("on");render(JSON.parse(m.data))};
+es.onerror=()=>{if(es.readyState===EventSource.CLOSED)showAuth("连接被拒绝（401）：token 无效或已变更，重新粘贴一次")}}
+function render(e){
 if(e.type==="snapshot"){e.assets&&(assets=e.assets);e.dec&&(dec=e.dec);e.quickPicks&&(qp=e.quickPicks);syncCards();
 e.prices&&Object.entries(e.prices).forEach(([a,p])=>price(a,p));
 e.open&&Object.entries(e.open).forEach(([a,p])=>{open[a]=open[a]||{};open[a].open=p});draw();
@@ -140,7 +154,10 @@ if(e.type==="tape"){tape={...tape,...e.tape};drawTape();return}
 if(e.type==="assets"){assets=e.assets||assets;if(e.dec)dec=e.dec;syncCards();draw();drawCoins();drawTape();return}
 if(e.type==="decision"){const i=feed.findIndex(x=>x.id===e.id);if(i>=0)feed[i]=e;else{feed.unshift(e);feed=feed.slice(0,60)}drawFeed();return}
 if(e.type==="trade"){const i=feed.findIndex(x=>x.id===e.id);if(i>=0){feed[i].note=e.note;drawFeed()}
-if(e.equity!=null){acct.eq=e.equity;acct.positions=e.positions;drawEq();drawTape()}}};
+if(e.equity!=null){acct.eq=e.equity;acct.positions=e.positions;drawEq();drawTape()}}}
+$("#ab").onclick=()=>{const v=$("#at").value.trim();if(!v)return;T=v;localStorage.setItem("jevT",v);connect()};
+$("#at").onkeydown=(ev)=>{if(ev.key==="Enter")$("#ab").click()};
+connect();
 $("#f").onsubmit=async(ev)=>{ev.preventDefault();const v=$("#h").value.trim();if(!v)return;$("#h").value="";
 await fetch("/news?t="+T,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({headline:v})})};
 </script></body></html>`;
