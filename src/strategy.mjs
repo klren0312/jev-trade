@@ -81,8 +81,7 @@ export async function decideMove(asset, changePct, ctx = "") {
   const level = answers.strength.score_index
     ?? (typeof answers.strength.score === "number" ? Math.round(answers.strength.score) : SENTIMENT_LEVELS.indexOf(answers.strength.score));
   const conf = Math.min(cont.confidence, answers.strength.confidence);
-  const action = cont.noul >= 0.6 && level >= 3 && conf >= CONF_MIN ? "buy"
-    : cont.noul <= 0.4 && level >= 3 && conf >= CONF_MIN ? "sell" : "skip";
+  const action = momentumAction({ up: changePct > 0, cont: cont.noul, level, conf });
   return {
     action,
     source: "momentum",
@@ -90,6 +89,15 @@ export async function decideMove(asset, changePct, ctx = "") {
     reason: `momentum: cont=${cont.noul.toFixed(2)} strength=${level}/4 conf=${conf.toFixed(2)}`,
     signals: { material: cont, sentiment: answers.strength, asset: { choice: asset } },
   };
+}
+
+// "Will this move continue?" is directional: the same answer means opposite trades
+// on a rally and on a dump. Kept pure so the mapping is testable without the API.
+export function momentumAction({ up, cont, level, conf }) {
+  if (level < 3 || conf < CONF_MIN) return "skip";
+  if (cont >= 0.6) return up ? "buy" : "sell"; // the move runs on
+  if (cont <= 0.4) return up ? "sell" : "buy"; // the move is expected to fade
+  return "skip";
 }
 
 // Risk path: an open position is itself a standing decision. Fed by price
@@ -172,6 +180,7 @@ const DEEP_NET_MIN = 0.2;
 export function positionSize(decision, account, price, equity) {
   const haircut = decision.source === "deep" ? 0.5 : 1; // act smaller on deliberated calls
   if (decision.action === "buy") {
+    if (decision.notional != null) return decision.notional; // rule entries carry their own size
     const conf = decision.signals.material.confidence;
     return equity * (0.10 + 0.10 * conf) * haircut; // USD notional, 10-20% of equity
   }

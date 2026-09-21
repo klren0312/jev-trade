@@ -102,7 +102,7 @@ button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:9px 18px
 const QS=new URLSearchParams(location.search);
 let T=QS.get("t")||localStorage.getItem("jevT")||"";
 if(QS.get("t"))localStorage.setItem("jevT",QS.get("t"));
-let open={},cards={},feed=[],acct={},tape={},risk={},assets=[],dec={},qp=[],coinsErr="";
+let open={},cards={},feed=[],acct={},tape={},risk={},entry={},assets=[],dec={},qp=[],coinsErr="";
 const $=(s)=>document.querySelector(s);
 const decOf=(a)=>dec[a]!=null?dec[a]:(open[a]&&open[a].p<10?4:2);
 function card(a){if(cards[a])return cards[a];const d=document.createElement("div");d.className="card";
@@ -135,7 +135,9 @@ const q=(acct.positions||{})[a];const f=(x,n=2)=>x==null?"–":((x>=0?"+":"")+Nu
 return '<span class="sig"><b class="dim">'+a+'</b> 价格 '+(t.px==null?"–":fmt(t.px,n))+' 成本 '+(q&&q.cost!=null?fmt(q.cost,n):"–")+' 浮动 <span class="'+(q&&q.pnlPct>=0?"up":"down")+'">'+(q?f(q.pnlPct):"–")+'</span>'+
 ' · RSI14 '+(t.rsi14==null?"–":Number(t.rsi14).toFixed(0))+' · 量比 '+(t.volRatio==null?"–":Number(t.volRatio).toFixed(2))+
 ' · 5分 '+f(t.pct5)+' · 30分 '+f(t.pct30)+' · 1时 '+f(t.pct60)+' · 24h '+f(t.pct24,1)+' · 区间 '+(t.rangePos==null?"–":Number(t.rangePos).toFixed(0)+"%")+'</span>'}).join("<br>");
-$("#tape").innerHTML=(rows||"")+'<div class="sig dim">风控阈值：止损 -'+fmt(R.stopPct)+'% · 移动止盈 回吐 '+fmt(R.trailPct)+'%（浮盈≥'+fmt(R.trailArm??R.trailArmPct)+'% 后激活）· 止盈 +'+fmt(R.tpPct)+'% · 持仓复核 每 '+fmt(R.reviewMin,0)+' 分</div>'}
+$("#tape").innerHTML=(rows||"")+'<div class="sig dim">风控阈值：止损 -'+fmt(R.stopPct)+'% · 移动止盈 回吐 '+fmt(R.trailPct)+'%（浮盈≥'+fmt(R.trailArm??R.trailArmPct)+'% 后激活）· 止盈 +'+fmt(R.tpPct)+'% · 持仓复核 每 '+fmt(R.reviewMin,0)+' 分</div>'+
+(entryLine())}
+function entryLine(){const E=entry||{};if(!E.dipRsi)return"";return '<div class="sig dim">建仓规则：超卖回调 RSI≤'+fmt(E.dipRsi,0)+' 且 24h区间≤'+fmt(E.dipRangePos,0)+'% 且 30分跌≥'+fmt(E.dipDrop30)+'%　|　放量突破 1时涨≥'+fmt(E.breakoutRise60)+'% 且 量比≥'+fmt(E.breakoutVolRatio)+' 且 区间≥'+fmt(E.breakoutRangePos,0)+'%　|　单笔 '+fmt(E.buyPct*100,1)+'% 权益，最多 '+fmt(E.maxPositions,0)+' 仓</div>'}
 let es=null;
 function showAuth(m){$("#authmsg").textContent=m;$("#auth").classList.add("on")}
 function connect(){if(!T){showAuth("需要 token：服务器上执行 cat .dash_token，粘贴到右边后回车");return}
@@ -147,7 +149,7 @@ function render(e){
 if(e.type==="snapshot"){e.assets&&(assets=e.assets);e.dec&&(dec=e.dec);e.quickPicks&&(qp=e.quickPicks);syncCards();
 e.prices&&Object.entries(e.prices).forEach(([a,p])=>price(a,p));
 e.open&&Object.entries(e.open).forEach(([a,p])=>{open[a]=open[a]||{};open[a].open=p});draw();
-acct={eq:e.equity,start:e.startCash,positions:e.positions};risk=e.risk||{};tape=e.tape||tape;
+acct={eq:e.equity,start:e.startCash,positions:e.positions};risk=e.risk||{};entry=e.entry||{};tape=e.tape||tape;
 $("#eq").textContent=fmt(e.equity);drawEq();drawTape();drawCoins();feed=e.events||[];drawFeed();return}
 if(e.type==="price"){price(e.asset,e.price);acct.eq=e.equity;$("#eq").textContent=fmt(e.equity);drawEq();return}
 if(e.type==="tape"){tape={...tape,...e.tape};drawTape();return}

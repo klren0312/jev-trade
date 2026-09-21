@@ -11,6 +11,7 @@ import { PaperAccount } from "./exchange.mjs";
 import { decide, decideMove, decideRisk, positionSize } from "./strategy.mjs";
 import { rsi, volRatio, ampPct, rangePos, slopePct } from "./price.mjs";
 import { riskKind, RISK_FULL_EXIT, RISK_DEFAULTS } from "./risk.mjs";
+import { entryKind, entryNotional, ENTRY_DEFAULTS } from "./entry.mjs";
 import { parseAssets, toSymbol, diffAssets, decimalsFromTick, DEFAULT_QUOTE, DEFAULT_ASSET, QUICK_PICKS } from "./assets.mjs";
 import { live } from "./jev.mjs";
 import { startDashboard } from "./dashboard.mjs";
@@ -34,7 +35,7 @@ const PAIR_OF = {}; // pair -> asset, for inbound price callbacks
 const prices = {}; // deliberately kept for pairs dropped from the watchlist while still held
 const open = {};
 const meta = {}; // asset -> { dec, minNotional }
-const cooldown = {}, riskCooldown = {};
+const cooldown = {}, riskCooldown = {}, entryCooldown = {}, rearmAt = {};
 
 // Account and decision feed survive restarts: state is rewritten atomically
 // after every decision/fill, never on a price tick (that would hammer the disk).
@@ -267,6 +268,8 @@ function logDecision(headline, decision) {
     console.log(`\n  Jev risk: exit=${signals.material.noul.toFixed(2)} severity=${signals.sentiment.score_index ?? signals.sentiment.score}/4 建议卖出比例 ${(decision.fraction * 100).toFixed(0)}%`);
   } else if (decision.source === "rule") {
     console.log(`\n  规则直接执行（未询问 Jev）`);
+  } else if (decision.source === "entry") {
+    console.log(`\n  规则直接建仓（未询问 Jev）`);
   } else if (decision.deep) {
     const d = decision.deep;
     console.log(`\n  Jev fast: material=${signals.material.noul.toFixed(2)} → 灰区，System Two 复核`);
@@ -286,6 +289,7 @@ function sigLine(decision) {
   const { signals } = decision;
   const f2 = (x) => Number(x).toFixed(2);
   if (decision.source === "momentum") return `cont=${f2(signals.material.noul)} str=${signals.sentiment.score_index ?? f2(signals.sentiment.score)}/4`;
+  if (decision.source === "entry") return `规则 ${decision.kind} 买 ${(decision.notional / equityNow() * 100).toFixed(1)}%权益`;
   if (decision.source === "risk") return `exit=${f2(signals.material.noul)} sev=${signals.sentiment.score_index ?? f2(signals.sentiment.score)}/4 卖${(decision.fraction * 100).toFixed(0)}%`;
   if (decision.source === "rule") return `rule 卖${(decision.fraction * 100).toFixed(0)}%`;
   if (decision.deep) {
@@ -321,9 +325,15 @@ function afterDecision(headline, decision, opts) {
     const t = account.buy(decision.asset, px, notional, { bar: 0, headline });
     if (t) { console.log(`  成交: BUY ${t.qty.toFixed(6)} ${decision.asset} @ ${px.toFixed(dec)} 费用 ${t.fee.toFixed(2)}`); tradeEvt(evt.id, `BUY ${t.qty.toFixed(2)} @ ${px.toFixed(dec)}`); saveState(); }
   } else {
+    const costBefore = account.cost[decision.asset] ?? px;
     const qty = positionSize(decision, account, px);
     const t = account.sell(decision.asset, px, qty, { bar: 0, headline });
-    if (t) { console.log(`  成交: SELL ${t.qty.toFixed(6)} ${decision.asset} @ ${px.toFixed(dec)} 费用 ${t.fee.toFixed(2)}`); tradeEvt(evt.id, `SELL ${t.qty.toFixed(2)} @ ${px.toFixed(dec)}`); saveState(); }
+    if (t) {
+      // A loss exit re-arms a cooldown: the dip rule would otherwise keep buying the
+      // same slide until the stop fires again.
+      if (px < costBefore) rearmAt[decision.asset] = Date.now();
+      console.log(`  成交: SELL ${t.qty.toFixed(6)} ${decision.asset} @ ${px.toFixed(dec)} 费用 ${t.fee.toFixed(2)}`); tradeEvt(evt.id, `SELL ${t.qty.toFixed(2)} @ ${px.toFixed(dec)}`); saveState();
+    }
     else console.log(`  ${decision.asset} 无持仓，卖单跳过`);
   }
   syncFeed(); // a closed out-of-watchlist lot no longer needs a quote stream
@@ -398,6 +408,26 @@ const REVIEW_MS = Number(process.env.JEV_REVIEW_MS || RISK_DEFAULTS.reviewMs);  
 const RISK_COOLDOWN_MS = Number(process.env.JEV_RISK_COOLDOWN_MS || 10 * 60000);
 const riskThresholds = { stopPct: STOP_PCT, tpPct: TP_PCT, trailArmPct: TRAIL_ARM_PCT, trailPct: TRAIL_PCT, reviewMs: REVIEW_MS };
 
+// Rule entries: the same argument as the hard stop, turned around. Measured over 64
+// tape events the live model's "will this move continue" topped out at 0.47 and no RSS
+// headline cleared 0.5 materiality, so gating a buy on it leaves the book permanently
+// empty. These thresholds were replayed against real 1m candles before being trusted.
+const ENTRY_BUY_PCT = Number(process.env.JEV_ENTRY_BUY_PCT ?? ENTRY_DEFAULTS.buyPct);
+const ENTRY_MAX_POSITIONS = Number(process.env.JEV_MAX_POSITIONS ?? ENTRY_DEFAULTS.maxPositions);
+const ENTRY_COOLDOWN_MS = Number(process.env.JEV_ENTRY_COOLDOWN_MS || 30 * 60000);
+const ENTRY_REARM_MS = Number(process.env.JEV_ENTRY_REARM_MS || 45 * 60000); // 刚在该币种止损后的冷静期
+const entryThresholds = {
+  dipRsi: Number(process.env.JEV_DIP_RSI ?? ENTRY_DEFAULTS.dipRsi),
+  dipRangePos: Number(process.env.JEV_DIP_RANGE_POS ?? ENTRY_DEFAULTS.dipRangePos),
+  dipDrop30: Number(process.env.JEV_DIP_DROP30 ?? ENTRY_DEFAULTS.dipDrop30),
+  breakoutRise60: Number(process.env.JEV_BREAKOUT_RISE60 ?? ENTRY_DEFAULTS.breakoutRise60),
+  breakoutVolRatio: Number(process.env.JEV_BREAKOUT_VOL_RATIO ?? ENTRY_DEFAULTS.breakoutVolRatio),
+  breakoutRangePos: Number(process.env.JEV_BREAKOUT_RANGE_POS ?? ENTRY_DEFAULTS.breakoutRangePos),
+  breakoutRsiMax: Number(process.env.JEV_BREAKOUT_RSI_MAX ?? ENTRY_DEFAULTS.breakoutRsiMax),
+  buyPct: ENTRY_BUY_PCT,
+  maxPositions: ENTRY_MAX_POSITIONS,
+};
+
 function submitDecision(task) {
   submitTask(async () => {
     const decision = await task();
@@ -420,6 +450,36 @@ function entryScan(now) {
     console.log(`\n[entry] ${title}`);
     const chg = c5 ?? c30 ?? t?.slope15 ?? 0;
     submitDecision(async () => ({ ...(await decideMove(a, chg, marketCtx())), __headline: title }));
+  }
+}
+
+// Open a position from tape facts alone. One lot per coin, a bounded number of lots
+// in total, and a re-arm delay on a coin we just stopped out on so a slide does not
+// get bought back in three equal pieces.
+function ruleEntryScan(now, tape) {
+  let slots = entryThresholds.maxPositions - Object.values(account.positions).filter((q) => q > 0).length;
+  if (slots <= 0) return;
+  const equity = equityNow();
+  for (const a of ASSETS) {
+    if (slots <= 0) break;
+    if ((account.positions[a] ?? 0) > 0) continue;
+    if (now - (entryCooldown[a] ?? 0) < ENTRY_COOLDOWN_MS) continue;
+    if (now - (rearmAt[a] ?? 0) < ENTRY_REARM_MS) continue;
+    const f = tape[a];
+    const kind = entryKind({ ...f, held: false }, entryThresholds);
+    if (!kind) continue;
+    const notional = entryNotional(kind, equity, entryThresholds);
+    entryCooldown[a] = now; cooldown[a] = now; slots--;
+    const facts = `RSI14=${f.rsi14?.toFixed(0) ?? "–"} 24h区间${f.rangePos?.toFixed(0) ?? "–"}% ` +
+      `近30分${pct(f.pct30)} 近1时${pct(f.pct60)} 量比${f.volRatio?.toFixed(2) ?? "–"}`;
+    const title = `[规则入场:${kind}] ${a} ${facts}，现价 ${prices[a].toFixed(decOf(a))}`;
+    console.log(`\n[entry] ${title} → 买 ${notional.toFixed(2)} USDC`);
+    submitDecision(async () => ({
+      action: "buy", source: "entry", asset: a, kind, notional,
+      reason: `规则入场 ${kind}（不经 Jev）：${facts}`,
+      signals: { material: { noul: 1, confidence: 1 }, sentiment: {}, asset: { choice: a } },
+      __headline: title,
+    }));
   }
 }
 
@@ -460,7 +520,9 @@ function riskScan(now) {
 
 function priceScan() {
   const now = Date.now();
-  bus.emit("evt", { type: "tape", tape: tapeSnapshot() });
+  const tape = tapeSnapshot();
+  bus.emit("evt", { type: "tape", tape });
+  ruleEntryScan(now, tape);
   entryScan(now);
   riskScan(now);
 }
@@ -475,6 +537,9 @@ if (process.env.JEV_AUTO_NEWS === "1") {
   console.log("[news] 自动新闻循环已开启 (CoinTelegraph RSS)");
 }
 console.log(`[price] 纯行情决策已开启：每${SCAN_MS / 1000}s 扫描 5分±0.8%/30分±1.5%/RSI±(72,28) 入场，` +
+  `建仓(规则) dip RSI≤${entryThresholds.dipRsi}+区间≤${entryThresholds.dipRangePos}%+30分≤${-entryThresholds.dipDrop30}%` +
+  ` / breakout 1时≥${entryThresholds.breakoutRise60}%+量比≥${entryThresholds.breakoutVolRatio}+区间≥${entryThresholds.breakoutRangePos}%，` +
+  `单笔 ${entryThresholds.buyPct * 100}% 权益 × 最多 ${entryThresholds.maxPositions} 仓；` +
   `风控 止损-${STOP_PCT}% 止盈+${TP_PCT}% 移动止盈回吐${TRAIL_PCT}% 持仓复核${REVIEW_MS / 60000}分；指标每${TECH_MS / 1000}s 刷新`);
 
 function dashToken() {
@@ -505,6 +570,7 @@ if (process.env.JEV_DASH_PORT) {
         dec: Object.fromEntries(ASSETS.map((a) => [a, decOf(a)])),
         quickPicks: QUICK_PICKS,
         risk: { stopPct: STOP_PCT, tpPct: TP_PCT, trailPct: TRAIL_PCT, trailArm: TRAIL_ARM_PCT, reviewMin: REVIEW_MS / 60000 },
+        entry: { ...entryThresholds },
         events: events.slice(0, 60),
       };
     },

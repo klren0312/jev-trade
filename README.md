@@ -56,22 +56,22 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 ## 决策链路
 
 ```
-新闻(RSS/输入)          行情扫描(每30s)             持仓风控扫描
-     │                        │                          │
-     ▼                        ▼                          ▼
-  fast：一次 Jev 调用      momentum：动量续势判断     纯规则 riskKind()
-  3 问：是否利好事件 /     (decideMove)               ├ stop → 直接清仓，不问 Jev
-  多空 5 档 / 影响哪个币        │                      └ tp/trailing/review → Jev 打分
-     │                         │                          │
-  灰区(noul<0.68 或 conf<0.55) └───────┬──────────────────┘
-     ▼                                 ▼
-  deep：System Two 4 问            决策 {action, reason, asset, signals}
-  bull/bear/直接性/事实性                 │
-     │                                    ▼
+新闻(RSS/输入)     行情扫描(每30s)        建仓规则扫描        持仓风控扫描
+     │                  │                     │                   │
+     ▼                  ▼                     ▼                   ▼
+  fast：一次 Jev      momentum：            entry：纯规则        纯规则 riskKind()
+  调用 3 问           动量续势判断          直接买，不问 Jev     ├ stop → 直接清仓，不问 Jev
+  是否利好/多空/      (decideMove)               │              └ tp/trailing/review → Jev 打分
+  影响哪个币               │                    │                     │
+  灰区 ────────────────────┴───────┬────────────┴─────────────────────┘
+     ▼                             ▼
+  deep：System Two 4 问      决策 {action, reason, asset, signals}
+  bull/bear/直接性/事实性           │
+     │                              ▼
      └────────────────────► positionSize() → PaperAccount 撮合 → 落盘 + SSE
 ```
 
-四个决策来源：`fast`（新闻快思考）、`deep`（新闻慢思考复核）、`momentum`（纯行情）、`risk`/`rule`（持仓风控）。价格层每次决策都会带一段「市场状态」上下文：现价、近 5/30/60 分钟涨跌、24h 区间位置、RSI14、量比、15/60 分斜率、1 分钟均幅。
+五个决策来源：`fast`（新闻快思考）、`deep`（新闻慢思考复核）、`momentum`（纯行情）、`entry`（规则建仓）、`risk`/`rule`（持仓风控）。价格层每次决策都会带一段「市场状态」上下文：现价、近 5/30/60 分钟涨跌、24h 区间位置、RSI14、量比、15/60 分斜率、1 分钟均幅。
 
 ## 风控规则（硬规则，`src/risk.mjs`）
 
@@ -89,9 +89,22 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 
 **为什么止损不走模型**：实测 Jev 会把 −5% 的回撤判成「轻微」并否决卖出（`exitNow` 长期在 0.5 附近），而一个能被预测否决的止损不是止损。所以止损只由规则执行；其余风控仍让模型判断严重度，并按 `severity ≥ 3` 才卖、`≥ 4` 或 `exitNow ≥ 0.75` 清仓来配比例。
 
+## 建仓规则（硬规则，`src/entry.mjs`）
+
+止损是「规则说不买就不买」的镜像问题：建仓也不能只靠模型打分。默认值是跑出来的——上线前用 3 天真实 1 分钟 K 线回放，两条腿各 1~2 次/天（山寨币突破 4~6 次/天），样本内收益非负。
+
+| 腿 | 触发条件（需已持有=0，且指标已预热） | 名义额 |
+| --- | --- | --- |
+| `dip` 超卖回调 | RSI14 ≤ **34** 且 24h 区间位置 ≤ **35%** 且 近 30 分钟 ≤ **-1%** | 权益 **10%** |
+| `breakout` 放量突破 | 近 1 小时 ≥ **+1%** 且 量比 ≥ **1.4** 且 区间位置 ≥ **65%** 且 RSI14 ≤ **70** | 权益 10% × **0.75** |
+
+调度：最多同时 **3** 个仓位（`JEV_MAX_POSITIONS`），同一币种 30 秒规则冷却（`JEV_ENTRY_COOLDOWN_MS`）；在某币种止损离场后 **45 分钟**内不再买回（`JEV_ENTRY_REARM_MS`），避免一段阴跌被均匀接成三笔。指标没算出来（`rsi14`/`rangePos` 为空）时一律跳过，不猜。
+
+**为什么不把买入交给模型**：实测线上 Jev 极保守——64 次行情事件里「这波会不会延续」最高 **0.47**（动量问答的门槛是 0.6），新闻材料性最高 **0.42**（快思考下单门槛 0.5）。结果是 194 次决策 **0 次买入**，账面长期空仓。这类绝对阈值闸门在模型侧不可达，所以建仓改由确定性规则直接执行（`source: "entry"`，日志里标明「未询问 Jev」），模型仍然负责平仓、止盈和复核。
+
 ## 仓位与账簿
 
-- 买入名义额 = 权益的 10%~20%（按置信度线性放大），`deep` 决策再乘 0.5 折扣；卖出比例默认 40%，风控决策自带 `fraction`。
+- 买入名义额 = 权益的 10%~20%（按置信度线性放大），`deep` 决策再乘 0.5 折扣；`entry` 决策自带名义额（见上表），不再走置信度；卖出比例默认 40%，风控决策自带 `fraction`。
 - 手续费 10 bps，市价成交，现金不足自动缩量，卖单超过持仓自动截断。
 - `PaperAccount` 额外记 加权成本 `cost`、入场后峰值 `peak`、开仓时间 `entryAt`（风控靠这三个算浮盈/回吐/持仓时长）。
 
@@ -107,17 +120,18 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 | 文件 | 职责 |
 | --- | --- |
 | `src/assets.mjs` | 币种输入解析、symbol 归一化、tickSize→显示位数、列表 diff（纯函数，可单测） |
-| `src/live.mjs` | 常驻入口：行情订阅、REPL、新闻/行情/风控三条扫描循环、币种注册表、状态落盘、看板装配 |
+| `src/live.mjs` | 常驻入口：行情订阅、REPL、新闻/行情/建仓/风控四条扫描循环、币种注册表、状态落盘、看板装配 |
 | `src/jev.mjs` | Jev REST 客户端（`POST /v1/systemone`）+ 无 key 时的确定性 mock |
 | `src/strategy.mjs` | `decide`/`deepReview`/`decideMove`/`decideRisk` + `positionSize` |
 | `src/risk.mjs` | 纯规则引擎 `riskKind()`、默认阈值、全清仓集合（可单测，不依赖行情） |
+| `src/entry.mjs` | 纯规则建仓 `entryKind()`（dip/breakout）、`entryNotional()`、默认阈值（可单测，可注入阈值） |
 | `src/exchange.mjs` | 模拟成交账簿、序列化/恢复 |
 | `src/feed.mjs` | Binance WS miniTicker + REST 兜底 + `snapshot`/`stats24h`/`klines` |
 | `src/price.mjs` | RSI、量比、振幅、区间位置、斜率 |
 | `src/news.mjs` | CoinTelegraph RSS 轮询、去重、首屏 priming |
 | `src/dashboard.mjs` | 零依赖 `node:http` 看板：SSE + token 保护的 `/news` |
 | `src/market.mjs` `src/backtest.mjs` | 合成行情与离线回测 |
-| `test/risk.test.mjs` `test/assets.test.mjs` | 规则优先级、账簿记账、全清仓 sizing、币种解析 |
+| `test/risk.test.mjs` `test/assets.test.mjs` `test/entry.test.mjs` | 规则优先级、账簿记账、全清仓 sizing、币种解析、建仓两条腿与动量方向 |
 
 ## 环境变量
 
@@ -131,6 +145,10 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 | `JEV_STATE_FILE` | `.paper_state.json` | 状态文件路径 |
 | `JEV_SCAN_MS` / `JEV_TECH_MS` | `30000` / `60000` | 决策扫描 / K 线指标刷新间隔 |
 | `JEV_STOP_PCT` `JEV_TP_PCT` `JEV_TRAIL_ARM_PCT` `JEV_TRAIL_PCT` `JEV_REVIEW_MS` | `2` `6` `2` `1.5` `900000` | 风控阈值 |
+| `JEV_DIP_RSI` `JEV_DIP_RANGE_POS` `JEV_DIP_DROP30` | `34` `35` `1` | 回调建仓：RSI / 24h 区间位置 / 30 分跌幅 |
+| `JEV_BREAKOUT_RISE60` `JEV_BREAKOUT_VOL_RATIO` `JEV_BREAKOUT_RANGE_POS` `JEV_BREAKOUT_RSI_MAX` | `1` `1.4` `65` `70` | 突破建仓：1 小时涨幅 / 量比 / 区间位置 / RSI 上限 |
+| `JEV_ENTRY_BUY_PCT` `JEV_MAX_POSITIONS` | `0.10` `3` | 单笔占权益比例 / 最大同时持仓数 |
+| `JEV_ENTRY_COOLDOWN_MS` `JEV_ENTRY_REARM_MS` | `300000` / `2700000` | 同币种建仓冷却 / 止损后不回买的冷静期（45 分钟） |
 | `JEV_COOLDOWN_MS` / `JEV_RISK_COOLDOWN_MS` | `1200000` / `600000` | 入场 / 风控冷却 |
 | `JEV_DASH_PORT` / `JEV_DASH_TOKEN` | 关 / `.dash_token` | 看板端口与 token |
 | `JEV_AUTO_NEWS` / `JEV_NEWS_INTERVAL` | 关 / `60000` | 自动新闻轮询 |
@@ -139,6 +157,6 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 ## 已知的现实约束
 
 - 本机和目标服务器都只有 `data-api.binance.vision` / `data-stream.binance.vision` 可达，OKX、Coinbase、binance.com 会超时。
-- 线上 Jev 与文档/mock 行为不一致：`score` 返回**数字**加 `legend` 映射（不是档位字符串）；`noul` **不返回 confidence**（代码用 `max(p, 1-p)` 推）；整体比关键词 mock 保守得多，把「某币涨了 x%」当作非事件（mat≈0.25）——所以行情决策走独立问答，不复用新闻的材料性闸门。
+- 线上 Jev 与文档/mock 行为不一致：`score` 返回**数字**加 `legend` 映射（不是档位字符串）；`noul` **不返回 confidence**（代码用 `max(p, 1-p)` 推）；整体比关键词 mock 保守得多，把「某币涨了 x%」当作非事件（mat≈0.25）——所以行情决策走独立问答，不复用新闻的材料性闸门。更要注意的是它的概率输出**集中在 0.3~0.5**，任何「≥0.6 才买」的绝对闸门实测都打不开（曾连续 194 次决策 0 次买入）：建仓交给规则，模型只负责该不该平、平多少。
 - 服务器（`/root/jev-trade`，CentOS 9）用 pm2 常驻：进程定义 `ecosystem.config.cjs`，开机自启靠 systemd 单元 `pm2-root`（`pm2 startup` 生成，已 enabled），日志 `logs/` 由 `/etc/logrotate.d/jev-trade` 每日切割。node 走 nvm 绝对路径；安全组只放通 3000。
 - 生产上请轮换并重新写入 `.jev_key`，不要把它贴进任何命令行或聊天记录。
