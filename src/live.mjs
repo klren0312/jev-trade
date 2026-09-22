@@ -105,6 +105,7 @@ async function refreshTech() {
     try {
       const bars = (await klines(SYMBOLS[a], "1m", 120)).slice(0, -1); // drop the forming bar
       const closes = bars.map((b) => b.c);
+      seedHist(a, bars);
       tech[a] = {
         at: Date.now(),
         rsi14: rsi(closes),
@@ -129,10 +130,23 @@ function pushHist(a, p) {
   arr.push({ t: now, p });
   while (arr.length && now - arr[0].t > 70 * 60000) arr.shift();
 }
+// A restart used to blind the 30/60-minute windows for an hour: chgPct() fell back to
+// "change since boot", so the pullback leg read a false near-zero and the entry scanner
+// sat idle. The 1m candles already fetched for RSI double as history backfill.
+function seedHist(a, bars) {
+  const arr = hist[a] ??= [];
+  const first = arr.length ? arr[0].t : Infinity;
+  const back = bars.filter((b) => b.t < first - 60000).map((b) => ({ t: b.t, p: b.c }));
+  if (back.length) hist[a] = back.concat(arr);
+  const cutoff = Date.now() - 70 * 60000;
+  while (hist[a].length && hist[a][0].t < cutoff) hist[a].shift();
+}
 function chgPct(a, mins) {
   const arr = hist[a]; if (!arr?.length) return null;
   const now = Date.now(), target = now - mins * 60000;
-  const base = arr.find((x) => x.t >= target) ?? arr[0];
+  const base = arr.find((x) => x.t >= target);
+  // oldest sample is newer than the window: no number is better than a wrong one
+  if (!base) return null;
   return prices[a] ? (prices[a] / base.p - 1) * 100 : null;
 }
 const pct = (x, digits = 2) => (x === null || x === undefined ? "–" : (x >= 0 ? "+" : "") + x.toFixed(digits) + "%");
