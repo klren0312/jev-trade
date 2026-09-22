@@ -137,7 +137,7 @@ return '<span class="sig"><b class="dim">'+a+'</b> 价格 '+(t.px==null?"–":fm
 ' · 5分 '+f(t.pct5)+' · 30分 '+f(t.pct30)+' · 1时 '+f(t.pct60)+' · 24h '+f(t.pct24,1)+' · 区间 '+(t.rangePos==null?"–":Number(t.rangePos).toFixed(0)+"%")+'</span>'}).join("<br>");
 $("#tape").innerHTML=(rows||"")+'<div class="sig dim">风控阈值：止损 -'+fmt(R.stopPct)+'% · 移动止盈 回吐 '+fmt(R.trailPct)+'%（浮盈≥'+fmt(R.trailArm??R.trailArmPct)+'% 后激活）· 止盈 +'+fmt(R.tpPct)+'% · 持仓复核 每 '+fmt(R.reviewMin,0)+' 分</div>'+
 (entryLine())}
-function entryLine(){const E=entry||{};if(!E.dipRsi)return"";return '<div class="sig dim">建仓规则：超卖回调 RSI≤'+fmt(E.dipRsi,0)+' 且 24h区间≤'+fmt(E.dipRangePos,0)+'% 且 30分跌≥'+fmt(E.dipDrop30)+'%　|　放量突破 1时涨≥'+fmt(E.breakoutRise60)+'% 且 量比≥'+fmt(E.breakoutVolRatio)+' 且 区间≥'+fmt(E.breakoutRangePos,0)+'%　|　单笔 '+fmt(E.buyPct*100,1)+'% 权益，最多 '+fmt(E.maxPositions,0)+' 仓</div>'}
+function entryLine(){const E=entry||{};if(!E.pullRsi)return"";return '<div class="sig dim">建仓规则：强势回调 RSI≤'+fmt(E.pullRsi,0)+' 且 24h区间≥'+fmt(E.pullRangePosMin,0)+'% 且 30分跌≥'+fmt(E.pullDrop30)+'%　|　放量突破 1时涨≥'+fmt(E.breakoutRise60)+'% 且 量比≥'+fmt(E.breakoutVolRatio)+' 且 区间≥'+fmt(E.breakoutRangePos,0)+'%　|　单笔 '+fmt(E.buyPct*100,1)+'% 权益，最多 '+fmt(E.maxPositions,0)+' 仓</div>'}
 let es=null;
 function showAuth(m){$("#authmsg").textContent=m;$("#auth").classList.add("on")}
 function connect(){if(!T){showAuth("需要 token：服务器上执行 cat .dash_token，粘贴到右边后回车");return}

@@ -7,12 +7,18 @@ import { momentumAction, positionSize, MOMENTUM_GATES } from "../src/strategy.mj
 const t = ENTRY_DEFAULTS;
 const kind = (f) => entryKind(f, t);
 
-test("dip: oversold at the bottom of the 24h range after a real drop", () => {
-  assert.equal(kind({ rsi14: 28, rangePos: 18, pct30: -1.6, pct60: -2.2, volRatio: 1.0, held: false }), "dip");
+test("pullback: short-term oversold while still in the upper half of the 24h range", () => {
+  assert.equal(kind({ rsi14: 28, rangePos: 69, pct30: -1.0, pct60: -0.3, volRatio: 0.7, held: false }), "pullback");
   // each leg alone is not enough
-  assert.equal(kind({ rsi14: 28, rangePos: 80, pct30: -1.6, pct60: -2.2, volRatio: 1.0, held: false }), null);
-  assert.equal(kind({ rsi14: 28, rangePos: 18, pct30: -0.4, pct60: -2.2, volRatio: 1.0, held: false }), null);
-  assert.equal(kind({ rsi14: 55, rangePos: 18, pct30: -1.6, pct60: -2.2, volRatio: 1.0, held: false }), null);
+  assert.equal(kind({ rsi14: 28, rangePos: 20, pct30: -1.6, pct60: -2.2, volRatio: 1.0, held: false }), null);
+  assert.equal(kind({ rsi14: 28, rangePos: 80, pct30: -0.4, pct60: -2.2, volRatio: 1.0, held: false }), null);
+  assert.equal(kind({ rsi14: 55, rangePos: 80, pct30: -1.6, pct60: -2.2, volRatio: 1.0, held: false }), null);
+});
+
+// The replay that set these numbers showed the old bottom-of-range version was both
+// rare (0.95 signals/coin/day) and loss-making (-0.14% after 30 min).
+test("a pullback outranks a breakout when both describe the same bar", () => {
+  assert.equal(kind({ rsi14: 30, rangePos: 70, pct30: -1.0, pct60: 1.2, volRatio: 1.6, held: false }), "pullback");
 });
 
 test("breakout: strength with volume, without chasing extreme overbought", () => {
@@ -33,14 +39,14 @@ test("no entry while holding, and none before the indicators exist", () => {
 test("thresholds are injectable", () => {
   const f = { rsi14: 45, rangePos: 50, pct30: -0.5, pct60: 0, volRatio: 0.9, held: false };
   assert.equal(kind(f), null);
-  assert.equal(entryKind(f, { ...t, dipRsi: 50, dipRangePos: 60, dipDrop30: 0.4 }), "dip");
+  assert.equal(entryKind(f, { ...t, pullRsi: 50, pullRangePosMin: 45, pullDrop30: 0.4 }), "pullback");
 });
 
-test("breakouts are sized smaller than dips", () => {
-  assert.equal(entryNotional("dip", 100000, t), 10000);
+test("breakouts are sized smaller than pullbacks", () => {
+  assert.equal(entryNotional("pullback", 100000, t), 10000);
   assert.equal(entryNotional("breakout", 100000, t), 7500);
-  assert.equal(entryNotional("dip", 0, t), 0);
-  assert.equal(entryNotional("dip", 100000, { ...t, buyPct: 0.05 }), 5000);
+  assert.equal(entryNotional("pullback", 0, t), 0);
+  assert.equal(entryNotional("pullback", 100000, { ...t, buyPct: 0.05 }), 5000);
 });
 
 test("an entry decision sizes from its own notional, not from confidence", () => {

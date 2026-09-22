@@ -91,12 +91,16 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 
 ## 建仓规则（硬规则，`src/entry.mjs`）
 
-止损是「规则说不买就不买」的镜像问题：建仓也不能只靠模型打分。默认值是跑出来的——上线前用 3 天真实 1 分钟 K 线回放，两条腿各 1~2 次/天（山寨币突破 4~6 次/天），样本内收益非负。
+止损是「规则说不买就不买」的镜像问题：建仓也不能只靠模型打分。两条腿的阈值都是用 4 天真实 1 分钟 K 线、5 个币回放出来的（每币每 90 分钟最多算一次信号，样本各 ≈100 次），并按「30 分钟后收益」排序选形态：
 
-| 腿 | 触发条件（需已持有=0，且指标已预热） | 名义额 |
-| --- | --- | --- |
-| `dip` 超卖回调 | RSI14 ≤ **34** 且 24h 区间位置 ≤ **35%** 且 近 30 分钟 ≤ **-1%** | 权益 **10%** |
-| `breakout` 放量突破 | 近 1 小时 ≥ **+1%** 且 量比 ≥ **1.4** 且 区间位置 ≥ **65%** 且 RSI14 ≤ **70** | 权益 10% × **0.75** |
+| 腿 | 触发条件（需未持有该币，且指标已预热） | 频率 / 30分后收益 | 名义额 |
+| --- | --- | --- | --- |
+| `pullback` 强势回调 | RSI14 ≤ **34** 且 24h 区间位置 ≥ **50%** 且 近 30 分钟 ≤ **-0.8%** | 4.9 次/币·天 / **+0.32%** | 权益 **10%** |
+| `breakout` 放量突破 | 近 1 小时 ≥ **+1%** 且 量比 ≥ **1.4** 且 区间位置 ≥ **65%** 且 RSI14 ≤ **70** | 5.4 次/币·天 / +0.14% | 权益 10% × **0.75** |
+
+回调腿同时满足突破腿时按 `pullback` 处理（更信这个形态），突破腿买得更小是因为 fading 时它最亏。
+
+**为什么把原来那条「超卖回调」删掉**：它要求 RSI≤34 **且** 价格处在 24h 区间下沿 35% 以内——实测这两个条件几乎互斥，短周期超卖通常发生在当天已经涨上去的区间里（现场样本：APT RSI14=25 而区间位置 69%）。4 天回放里它只给 0.95 次/币·天，且 30 分钟后收益 **-0.14%**：既稀有又是负期望，等于一条永不触发也不会赚的腿。
 
 调度：最多同时 **3** 个仓位（`JEV_MAX_POSITIONS`），同一币种 30 秒规则冷却（`JEV_ENTRY_COOLDOWN_MS`）；在某币种止损离场后 **45 分钟**内不再买回（`JEV_ENTRY_REARM_MS`），避免一段阴跌被均匀接成三笔。指标没算出来（`rsi14`/`rangePos` 为空）时一律跳过，不猜。
 
@@ -131,7 +135,7 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 | `src/jev.mjs` | Jev REST 客户端（`POST /v1/systemone`）+ 无 key 时的确定性 mock |
 | `src/strategy.mjs` | `decide`/`deepReview`/`decideMove`/`decideRisk` + `positionSize` |
 | `src/risk.mjs` | 纯规则引擎 `riskKind()`、默认阈值、全清仓集合（可单测，不依赖行情） |
-| `src/entry.mjs` | 纯规则建仓 `entryKind()`（dip/breakout）、`entryNotional()`、默认阈值（可单测，可注入阈值） |
+| `src/entry.mjs` | 纯规则建仓 `entryKind()`（pullback/breakout）、`entryNotional()`、默认阈值（可单测，可注入阈值） |
 | `src/exchange.mjs` | 模拟成交账簿、序列化/恢复 |
 | `src/feed.mjs` | Binance WS miniTicker + REST 兜底 + `snapshot`/`stats24h`/`klines` |
 | `src/price.mjs` | RSI、量比、振幅、区间位置、斜率 |
@@ -152,7 +156,7 @@ curl -X POST "http://<host>:3000/news?t=$(cat .dash_token)" \
 | `JEV_STATE_FILE` | `.paper_state.json` | 状态文件路径 |
 | `JEV_SCAN_MS` / `JEV_TECH_MS` | `30000` / `60000` | 决策扫描 / K 线指标刷新间隔 |
 | `JEV_STOP_PCT` `JEV_TP_PCT` `JEV_TRAIL_ARM_PCT` `JEV_TRAIL_PCT` `JEV_REVIEW_MS` | `2` `6` `2` `1.5` `900000` | 风控阈值 |
-| `JEV_DIP_RSI` `JEV_DIP_RANGE_POS` `JEV_DIP_DROP30` | `34` `35` `1` | 回调建仓：RSI / 24h 区间位置 / 30 分跌幅 |
+| `JEV_PULL_RSI` `JEV_PULL_RANGE_POS` `JEV_PULL_DROP30` | `34` `50` `0.8` | 强势回调建仓：RSI / 24h 区间位置下限 / 30 分回撤 |
 | `JEV_BREAKOUT_RISE60` `JEV_BREAKOUT_VOL_RATIO` `JEV_BREAKOUT_RANGE_POS` `JEV_BREAKOUT_RSI_MAX` | `1` `1.4` `65` `70` | 突破建仓：1 小时涨幅 / 量比 / 区间位置 / RSI 上限 |
 | `JEV_ENTRY_BUY_PCT` `JEV_MAX_POSITIONS` | `0.10` `3` | 单笔占权益比例 / 最大同时持仓数 |
 | `JEV_ENTRY_COOLDOWN_MS` `JEV_ENTRY_REARM_MS` | `300000` / `2700000` | 同币种建仓冷却 / 止损后不回买的冷静期（45 分钟） |

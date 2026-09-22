@@ -329,7 +329,7 @@ function afterDecision(headline, decision, opts) {
     const qty = positionSize(decision, account, px);
     const t = account.sell(decision.asset, px, qty, { bar: 0, headline }, dustUsd());
     if (t) {
-      // A loss exit re-arms a cooldown: the dip rule would otherwise keep buying the
+      // A loss exit re-arms a cooldown: the pullback rule would otherwise keep buying the
       // same slide until the stop fires again.
       if (px < costBefore) rearmAt[decision.asset] = Date.now();
       console.log(`  成交: SELL ${t.qty.toFixed(6)} ${decision.asset} @ ${px.toFixed(dec)} 费用 ${t.fee.toFixed(2)}`); tradeEvt(evt.id, `SELL ${t.qty.toFixed(2)} @ ${px.toFixed(dec)}`); saveState();
@@ -420,9 +420,9 @@ const ENTRY_REARM_MS = Number(process.env.JEV_ENTRY_REARM_MS || 45 * 60000); // 
 // the coin stops counting against maxPositions and can be bought again.
 const ENTRY_DUST_PCT = Number(process.env.JEV_DUST_PCT ?? 0.01);
 const entryThresholds = {
-  dipRsi: Number(process.env.JEV_DIP_RSI ?? ENTRY_DEFAULTS.dipRsi),
-  dipRangePos: Number(process.env.JEV_DIP_RANGE_POS ?? ENTRY_DEFAULTS.dipRangePos),
-  dipDrop30: Number(process.env.JEV_DIP_DROP30 ?? ENTRY_DEFAULTS.dipDrop30),
+  pullRsi: Number(process.env.JEV_PULL_RSI ?? ENTRY_DEFAULTS.pullRsi),
+  pullRangePosMin: Number(process.env.JEV_PULL_RANGE_POS ?? ENTRY_DEFAULTS.pullRangePosMin),
+  pullDrop30: Number(process.env.JEV_PULL_DROP30 ?? ENTRY_DEFAULTS.pullDrop30),
   breakoutRise60: Number(process.env.JEV_BREAKOUT_RISE60 ?? ENTRY_DEFAULTS.breakoutRise60),
   breakoutVolRatio: Number(process.env.JEV_BREAKOUT_VOL_RATIO ?? ENTRY_DEFAULTS.breakoutVolRatio),
   breakoutRangePos: Number(process.env.JEV_BREAKOUT_RANGE_POS ?? ENTRY_DEFAULTS.breakoutRangePos),
@@ -552,7 +552,7 @@ if (process.env.JEV_AUTO_NEWS === "1") {
   console.log("[news] 自动新闻循环已开启 (CoinTelegraph RSS)");
 }
 console.log(`[price] 纯行情决策已开启：每${SCAN_MS / 1000}s 扫描 5分±0.8%/30分±1.5%/RSI±(72,28) 入场，` +
-  `建仓(规则) dip RSI≤${entryThresholds.dipRsi}+区间≤${entryThresholds.dipRangePos}%+30分≤${-entryThresholds.dipDrop30}%` +
+  `建仓(规则) pullback RSI≤${entryThresholds.pullRsi}+区间≥${entryThresholds.pullRangePosMin}%+30分≤${-entryThresholds.pullDrop30}%` +
   ` / breakout 1时≥${entryThresholds.breakoutRise60}%+量比≥${entryThresholds.breakoutVolRatio}+区间≥${entryThresholds.breakoutRangePos}%，` +
   `单笔 ${entryThresholds.buyPct * 100}% 权益 × 最多 ${entryThresholds.maxPositions} 仓（碎仓<${(ENTRY_DUST_PCT * 100).toFixed(0)}%权益即清）；` +
   `动量闸 cont≥${momentumGates.runOn} 续势 / ≤${momentumGates.fadeMax} 反转；` +
