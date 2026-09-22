@@ -63,7 +63,15 @@ export async function decide(headline, assets = DEFAULT_ASSETS, ctx = "") {
 
 // Momentum path: a price move is not "news", so the news materiality gate
 // always skips it. Ask Jev about the move itself instead.
-export async function decideMove(asset, changePct, ctx = "") {
+//
+// Gates come from the observed distribution, not from symmetry. Over 334 live
+// momentum calls `cont` had p05=0.22, median=0.34, p95=0.40, max=0.47 and never
+// once reached 0.6: the "the move runs on" leg is unreachable, and a fade leg
+// mirrored at <=0.4 covered 96% of all calls — the book sold on every rally and
+// never bought. So the fade leg sits in the extreme left tail.
+export const MOMENTUM_GATES = { runOn: 0.6, fadeMax: 0.22 };
+
+export async function decideMove(asset, changePct, ctx = "", gates = MOMENTUM_GATES) {
   const dir = changePct > 0 ? "上涨" : "下跌";
   const state = `${asset} 价格在过去几分钟内${dir} ${Math.abs(changePct).toFixed(2)}%。${ctx}`;
   const answers = await systemOne(state, {
@@ -81,7 +89,7 @@ export async function decideMove(asset, changePct, ctx = "") {
   const level = answers.strength.score_index
     ?? (typeof answers.strength.score === "number" ? Math.round(answers.strength.score) : SENTIMENT_LEVELS.indexOf(answers.strength.score));
   const conf = Math.min(cont.confidence, answers.strength.confidence);
-  const action = momentumAction({ up: changePct > 0, cont: cont.noul, level, conf });
+  const action = momentumAction({ up: changePct > 0, cont: cont.noul, level, conf, ...gates });
   return {
     action,
     source: "momentum",
@@ -93,10 +101,10 @@ export async function decideMove(asset, changePct, ctx = "") {
 
 // "Will this move continue?" is directional: the same answer means opposite trades
 // on a rally and on a dump. Kept pure so the mapping is testable without the API.
-export function momentumAction({ up, cont, level, conf }) {
+export function momentumAction({ up, cont, level, conf, runOn = MOMENTUM_GATES.runOn, fadeMax = MOMENTUM_GATES.fadeMax }) {
   if (level < 3 || conf < CONF_MIN) return "skip";
-  if (cont >= 0.6) return up ? "buy" : "sell"; // the move runs on
-  if (cont <= 0.4) return up ? "sell" : "buy"; // the move is expected to fade
+  if (cont >= runOn) return up ? "buy" : "sell"; // the move runs on
+  if (cont <= fadeMax) return up ? "sell" : "buy"; // the move is expected to fade
   return "skip";
 }
 

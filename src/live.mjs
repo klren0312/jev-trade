@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createFeed, snapshot, stats24h, klines, symbolInfo } from "./feed.mjs";
 import { PaperAccount } from "./exchange.mjs";
-import { decide, decideMove, decideRisk, positionSize } from "./strategy.mjs";
+import { decide, decideMove, decideRisk, positionSize, MOMENTUM_GATES } from "./strategy.mjs";
 import { rsi, volRatio, ampPct, rangePos, slopePct } from "./price.mjs";
 import { riskKind, RISK_FULL_EXIT, RISK_DEFAULTS } from "./risk.mjs";
 import { entryKind, entryNotional, ENTRY_DEFAULTS } from "./entry.mjs";
@@ -327,7 +327,7 @@ function afterDecision(headline, decision, opts) {
   } else {
     const costBefore = account.cost[decision.asset] ?? px;
     const qty = positionSize(decision, account, px);
-    const t = account.sell(decision.asset, px, qty, { bar: 0, headline });
+    const t = account.sell(decision.asset, px, qty, { bar: 0, headline }, dustUsd());
     if (t) {
       // A loss exit re-arms a cooldown: the dip rule would otherwise keep buying the
       // same slide until the stop fires again.
@@ -416,6 +416,9 @@ const ENTRY_BUY_PCT = Number(process.env.JEV_ENTRY_BUY_PCT ?? ENTRY_DEFAULTS.buy
 const ENTRY_MAX_POSITIONS = Number(process.env.JEV_MAX_POSITIONS ?? ENTRY_DEFAULTS.maxPositions);
 const ENTRY_COOLDOWN_MS = Number(process.env.JEV_ENTRY_COOLDOWN_MS || 30 * 60000);
 const ENTRY_REARM_MS = Number(process.env.JEV_ENTRY_REARM_MS || 45 * 60000); // 刚在该币种止损后的冷静期
+// Below 1% of equity a partially-sold lot is noise, not a position: it gets swept so
+// the coin stops counting against maxPositions and can be bought again.
+const ENTRY_DUST_PCT = Number(process.env.JEV_DUST_PCT ?? 0.01);
 const entryThresholds = {
   dipRsi: Number(process.env.JEV_DIP_RSI ?? ENTRY_DEFAULTS.dipRsi),
   dipRangePos: Number(process.env.JEV_DIP_RANGE_POS ?? ENTRY_DEFAULTS.dipRangePos),
@@ -426,6 +429,13 @@ const entryThresholds = {
   breakoutRsiMax: Number(process.env.JEV_BREAKOUT_RSI_MAX ?? ENTRY_DEFAULTS.breakoutRsiMax),
   buyPct: ENTRY_BUY_PCT,
   maxPositions: ENTRY_MAX_POSITIONS,
+};
+
+// Defaults are the measured distribution of the model's continuation answer
+// (p05 0.22 / median 0.34 / max 0.47 over 334 calls), see strategy.mjs.
+const momentumGates = {
+  runOn: Number(process.env.JEV_CONT_MIN ?? MOMENTUM_GATES.runOn),
+  fadeMax: Number(process.env.JEV_FADE_MAX ?? MOMENTUM_GATES.fadeMax),
 };
 
 function submitDecision(task) {
@@ -449,20 +459,25 @@ function entryScan(now) {
     const title = `${hit}，现价 ${prices[a].toFixed(decOf(a))}`;
     console.log(`\n[entry] ${title}`);
     const chg = c5 ?? c30 ?? t?.slope15 ?? 0;
-    submitDecision(async () => ({ ...(await decideMove(a, chg, marketCtx())), __headline: title }));
+    submitDecision(async () => ({ ...(await decideMove(a, chg, marketCtx(), momentumGates)), __headline: title }));
   }
 }
 
 // Open a position from tape facts alone. One lot per coin, a bounded number of lots
 // in total, and a re-arm delay on a coin we just stopped out on so a slide does not
 // get bought back in three equal pieces.
+function heldUsd(a) { return (account.positions[a] ?? 0) * (prices[a] ?? account.cost[a] ?? 0); }
+function isHeld(a) { return heldUsd(a) > dustUsd(); }
+function dustUsd() { return equityNow() * ENTRY_DUST_PCT; }
+
 function ruleEntryScan(now, tape) {
-  let slots = entryThresholds.maxPositions - Object.values(account.positions).filter((q) => q > 0).length;
+  let slots = entryThresholds.maxPositions
+    - Object.keys(account.positions).filter((a) => isHeld(a)).length;
   if (slots <= 0) return;
   const equity = equityNow();
   for (const a of ASSETS) {
     if (slots <= 0) break;
-    if ((account.positions[a] ?? 0) > 0) continue;
+    if (isHeld(a)) continue;
     if (now - (entryCooldown[a] ?? 0) < ENTRY_COOLDOWN_MS) continue;
     if (now - (rearmAt[a] ?? 0) < ENTRY_REARM_MS) continue;
     const f = tape[a];
@@ -511,7 +526,7 @@ function riskScan(now) {
       }));
     } else if (kind === "review") {
       const c60 = chgPct(a, 60) ?? 0;
-      submitDecision(async () => ({ ...(await decideMove(a, c60, `${marketCtx()}\n[持仓] ${facts}`)), __headline: `${title}，定时复核趋势（近1时${pct(c60)}）` }));
+      submitDecision(async () => ({ ...(await decideMove(a, c60, `${marketCtx()}\n[持仓] ${facts}`, momentumGates)), __headline: `${title}，定时复核趋势（近1时${pct(c60)}）` }));
     } else {
       submitDecision(async () => ({ ...(await decideRisk(a, facts, marketCtx())), __headline: title }));
     }
@@ -539,7 +554,8 @@ if (process.env.JEV_AUTO_NEWS === "1") {
 console.log(`[price] 纯行情决策已开启：每${SCAN_MS / 1000}s 扫描 5分±0.8%/30分±1.5%/RSI±(72,28) 入场，` +
   `建仓(规则) dip RSI≤${entryThresholds.dipRsi}+区间≤${entryThresholds.dipRangePos}%+30分≤${-entryThresholds.dipDrop30}%` +
   ` / breakout 1时≥${entryThresholds.breakoutRise60}%+量比≥${entryThresholds.breakoutVolRatio}+区间≥${entryThresholds.breakoutRangePos}%，` +
-  `单笔 ${entryThresholds.buyPct * 100}% 权益 × 最多 ${entryThresholds.maxPositions} 仓；` +
+  `单笔 ${entryThresholds.buyPct * 100}% 权益 × 最多 ${entryThresholds.maxPositions} 仓（碎仓<${(ENTRY_DUST_PCT * 100).toFixed(0)}%权益即清）；` +
+  `动量闸 cont≥${momentumGates.runOn} 续势 / ≤${momentumGates.fadeMax} 反转；` +
   `风控 止损-${STOP_PCT}% 止盈+${TP_PCT}% 移动止盈回吐${TRAIL_PCT}% 持仓复核${REVIEW_MS / 60000}分；指标每${TECH_MS / 1000}s 刷新`);
 
 function dashToken() {
@@ -571,6 +587,7 @@ if (process.env.JEV_DASH_PORT) {
         quickPicks: QUICK_PICKS,
         risk: { stopPct: STOP_PCT, tpPct: TP_PCT, trailPct: TRAIL_PCT, trailArm: TRAIL_ARM_PCT, reviewMin: REVIEW_MS / 60000 },
         entry: { ...entryThresholds },
+        momentum: momentumGates,
         events: events.slice(0, 60),
       };
     },

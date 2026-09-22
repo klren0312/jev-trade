@@ -116,3 +116,22 @@ test("risk decisions can size a partial exit", () => {
   const deep = { action: "sell", source: "deep", asset: "APT", signals: { material: { confidence: 1 } } };
   assert.ok(Math.abs(positionSize(deep, a, 0.9, 900) - a.positions.APT * 0.2) < 1e-9);
 });
+
+// Regression: 40% trims decay a lot geometrically and never reach the 1e-12 floor, so
+// the residue stayed a position forever, occupied a maxPositions slot, and blocked the
+// coin from being bought again (measured on the server: SUI left holding 0.00003 units).
+test("a trim that leaves dust closes the lot instead", () => {
+  const a = new PaperAccount(100000);
+  a.buy("APT", 1.0, 10000, { bar: 1, headline: "h" });
+  a.sell("APT", 1.0, 9500, { bar: 2, headline: "h" }, 1000); // 500 USDC left < dust line
+  assert.equal(a.positions.APT, undefined);
+  assert.equal(a.cost.APT, undefined);
+  assert.equal(a.entryAt.APT, undefined);
+  assert.ok(Math.abs(a.cash - 99980) < 0.01, `cash ${a.cash}`); // both fees on the 10k lot
+
+  // above the dust line the partial exit stays partial
+  const b = new PaperAccount(100000);
+  b.buy("APT", 1.0, 10000, { bar: 1, headline: "h" });
+  b.sell("APT", 1.0, 8000, { bar: 2, headline: "h" }, 1000);
+  assert.ok(b.positions.APT > 1999);
+});

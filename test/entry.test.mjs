@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { entryKind, entryNotional, ENTRY_DEFAULTS } from "../src/entry.mjs";
-import { momentumAction, positionSize } from "../src/strategy.mjs";
+import { momentumAction, positionSize, MOMENTUM_GATES } from "../src/strategy.mjs";
 
 const t = ENTRY_DEFAULTS;
 const kind = (f) => entryKind(f, t);
@@ -66,4 +66,17 @@ test("a weak or low-confidence move never trades", () => {
   assert.equal(momentumAction({ up: true, cont: 0.9, level: 2, conf: 0.9 }), "skip");
   assert.equal(momentumAction({ up: true, cont: 0.9, level: 4, conf: 0.5 }), "skip");
   assert.equal(momentumAction({ up: false, cont: 0.1, level: 4, conf: 0.99 }), "buy");
+});
+
+// Regression: the model's continuation answer sits at median 0.34 (p05 0.22, max 0.47
+// over 334 live calls). Mirroring the 0.6 "runs on" gate at "<=0.4 fades" therefore
+// covered 96% of calls and liquidated every rally, which is how the book ended up with
+// 70 sells against 3 buys.
+test("the ordinary middle of the distribution does not trade", () => {
+  const ok = { level: 3, conf: 0.7 };
+  assert.equal(momentumAction({ ...ok, up: true, cont: 0.34 }), "skip");
+  assert.equal(momentumAction({ ...ok, up: false, cont: 0.34 }), "skip");
+  assert.equal(momentumAction({ ...ok, up: true, cont: 0.4 }), "skip"); // p95
+  assert.equal(momentumAction({ ...ok, up: true, cont: 0.22 }), "sell"); // p05, the fade tail
+  assert.equal(MOMENTUM_GATES.fadeMax, 0.22);
 });

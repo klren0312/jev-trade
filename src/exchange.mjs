@@ -30,10 +30,14 @@ export class PaperAccount {
     return trade;
   }
 
-  sell(asset, price, qty, meta) {
+  // A 40% trim repeated on the same lot decays it geometrically and never reaches
+  // the 1e-12 floor: the residue stays a "position", which blocks re-entry on that
+  // coin forever. `sweepBelow` (USD) closes the lot when what remains is noise.
+  sell(asset, price, qty, meta, sweepBelow = 0) {
     const held = this.positions[asset] ?? 0;
-    const actual = Math.min(qty, held);
+    let actual = Math.min(qty, held);
     if (actual <= 0) return null;
+    if ((held - actual) * price < sweepBelow) actual = held;
     const notional = actual * price;
     const fee = notional * FEE_BPS / 10000;
     this.cash += notional - fee;
