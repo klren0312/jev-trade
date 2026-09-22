@@ -336,6 +336,12 @@ function afterDecision(headline, decision, opts) {
     const notional = positionSize(decision, account, px, equityNow());
     const minNotional = meta[decision.asset]?.minNotional ?? 0;
     if (notional < minNotional) return console.log(`  名义额 ${notional.toFixed(2)} < Binance 最小 ${minNotional}，跳过`);
+    // A sub-dust residue carries an old cost/peak into the new lot: the peak from the
+    // previous position arm's a trailing stop against a entry that is actually flat.
+    if ((account.positions[decision.asset] ?? 0) > 0 && !isHeld(decision.asset)) {
+      const dust = account.sell(decision.asset, px, Infinity, { bar: 0, headline: "建仓前清理碎仓" }, Infinity);
+      if (dust) console.log(`  清理碎仓: SELL ${dust.qty.toFixed(6)} ${decision.asset} @ ${px.toFixed(dec)} 回收 ${(dust.qty * px - dust.fee).toFixed(4)} USDC`);
+    }
     const t = account.buy(decision.asset, px, notional, { bar: 0, headline });
     if (t) { console.log(`  成交: BUY ${t.qty.toFixed(6)} ${decision.asset} @ ${px.toFixed(dec)} 费用 ${t.fee.toFixed(2)}`); tradeEvt(evt.id, `BUY ${t.qty.toFixed(2)} @ ${px.toFixed(dec)}`); saveState(); }
   } else {
